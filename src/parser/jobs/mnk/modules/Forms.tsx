@@ -5,17 +5,18 @@ import {Status} from 'data/STATUSES'
 import {Event, Events} from 'event'
 import {Analyser} from 'parser/core/Analyser'
 import {EventHook} from 'parser/core/Dispatcher'
-import {filter, oneOf} from 'parser/core/filter'
+import {filter} from 'parser/core/filter'
 import {dependency} from 'parser/core/Injectable'
 import {Actors} from 'parser/core/modules/Actors'
 import {Data} from 'parser/core/modules/Data'
 import Downtime from 'parser/core/modules/Downtime'
 import Suggestions, {SEVERITY, Suggestion, TieredSuggestion} from 'parser/core/modules/Suggestions'
 import React from 'react'
-import {FORM_TIMEOUT_MILLIS, FORMS, OPO_OPO_ACTIONS} from './constants'
+import {BLITZ_ACTIONS, FORM_TIMEOUT_MILLIS, FORMS, OPO_OPO_ACTIONS} from './constants'
 import {fillActions, fillStatuses} from './utilities'
 
 export class Forms extends Analyser {
+	static override debug = true
 	static override handle = 'forms'
 
 	@dependency private actors!: Actors
@@ -24,27 +25,28 @@ export class Forms extends Analyser {
 	@dependency private suggestions!: Suggestions
 
 	private forms: Array<Status['id']> = []
-	private opoOpoSkills: Array<Action['id']> = []
+	private opoOpoActions: Array<Action['id']> = []
+	private blitzActions: Array<Action['id']> = [];
 
 	private formless: number = 0
 	private resetForms: number = 0
 	private skippedForms: number = 0
 	private droppedForms: number = 0
+	private lastForm: number = 0
 
 	private lastFormChanged: number | undefined
 	private lastFormDropped: number | undefined
-	private perfectlyFresh?: number
+	private lastBlitzUsed?: number
 
 	private formHook?: EventHook<Events['action']>
 
 	override initialise(): void {
 		this.forms = fillStatuses(FORMS, this.data)
-		this.opoOpoSkills = fillActions(OPO_OPO_ACTIONS, this.data)
+		this.opoOpoActions = fillActions(OPO_OPO_ACTIONS, this.data)
+		this.blitzActions = fillActions(BLITZ_ACTIONS, this.data)
 
 		const playerFilter = filter<Event>().source(this.parser.actor.id)
-		this.addEventHook(playerFilter.type('statusApply').status(oneOf(this.forms)), this.onGain)
-		this.addEventHook(playerFilter.type('statusRemove').status(oneOf(this.forms)), this.onRemove)
-		this.addEventHook(playerFilter.type('statusRemove').status(this.data.statuses.PERFECT_BALANCE.id), this.onPerfectOut)
+		this.addEventHook(playerFilter.type('action'), this.onCast)
 
 		this.addEventHook('complete', this.onComplete)
 	}
@@ -54,8 +56,23 @@ export class Forms extends Analyser {
 
 		if (action == null || !(action.onGcd ?? false)) { return }
 
+		if (this.blitzActions.includes(action.id)) {
+			this.lastBlitzUsed = event.timestamp
+		}
+
 		// Check the current form, or zero for no form
 		const currentForm = this.forms.find(form => this.actors.current.hasStatus(form)) || 0
+
+		// We went from having a from to losing a form
+		if (currentForm === 0 && this.lastForm !== 0) {
+			this.lastFormDropped = event.timestamp
+		}
+
+		if (currentForm !== 0) {
+			this.lastFormChanged = event.timestamp
+		}
+
+		this.lastForm = currentForm
 		const untargetable = this.lastFormChanged != null
 			? this.downtime.getDowntime(this.lastFormChanged, event.timestamp)
 			: 0
@@ -83,13 +100,15 @@ export class Forms extends Analyser {
 		// Using Opo-Opo skills resets form, but we don't care if we're in PB or FS
 		case this.data.statuses.RAPTOR_FORM.id:
 		case this.data.statuses.COEURL_FORM.id:
-			if (this.opoOpoSkills.includes(action.id)) { this.resetForms++ }
+			if (this.opoOpoActions.includes(action.id)) {
+				this.resetForms++
+			}
 			break
 
 		default:
 			// Fresh out of PB, they'll have no form
-			if (this.perfectlyFresh != null) {
-				this.perfectlyFresh = undefined
+			if (this.lastBlitzUsed != null) {
+				this.lastBlitzUsed = undefined
 				return
 			}
 
@@ -101,7 +120,7 @@ export class Forms extends Analyser {
 			}
 
 			// No form used
-			if (this.opoOpoSkills.includes(action.id)) {
+			if (this.opoOpoActions.includes(action.id)) {
 				this.formless++
 			}
 		}
@@ -126,10 +145,6 @@ export class Forms extends Analyser {
 			this.removeEventHook(this.formHook)
 			this.formHook = undefined
 		}
-	}
-
-	private onPerfectOut(event: Events['statusRemove']): void {
-		this.perfectlyFresh = event.timestamp
 	}
 
 	private onComplete(): void {

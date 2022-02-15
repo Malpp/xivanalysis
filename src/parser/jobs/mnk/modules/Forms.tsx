@@ -5,7 +5,7 @@ import {Status} from 'data/STATUSES'
 import {Event, Events} from 'event'
 import {Analyser} from 'parser/core/Analyser'
 import {EventHook} from 'parser/core/Dispatcher'
-import {filter} from 'parser/core/filter'
+import {filter, oneOf} from 'parser/core/filter'
 import {dependency} from 'parser/core/Injectable'
 import {Actors} from 'parser/core/modules/Actors'
 import {Data} from 'parser/core/modules/Data'
@@ -32,7 +32,6 @@ export class Forms extends Analyser {
 	private resetForms: number = 0
 	private skippedForms: number = 0
 	private droppedForms: number = 0
-	private lastForm: number = 0
 
 	private lastFormChanged: number | undefined
 	private lastFormDropped: number | undefined
@@ -46,7 +45,9 @@ export class Forms extends Analyser {
 		this.blitzActions = fillActions(BLITZ_ACTIONS, this.data)
 
 		const playerFilter = filter<Event>().source(this.parser.actor.id)
-		this.addEventHook(playerFilter.type('action'), this.onCast)
+		this.addEventHook(playerFilter.type('statusApply').status(oneOf(this.forms)), this.onGain)
+		this.addEventHook(playerFilter.type('statusRemove').status(oneOf(this.forms)), this.onRemove)
+		this.addEventHook(playerFilter.type('action').action(oneOf(this.blitzActions)), this.onBlitzUsed)
 
 		this.addEventHook('complete', this.onComplete)
 	}
@@ -56,23 +57,8 @@ export class Forms extends Analyser {
 
 		if (action == null || !(action.onGcd ?? false)) { return }
 
-		if (this.blitzActions.includes(action.id)) {
-			this.lastBlitzUsed = event.timestamp
-		}
-
 		// Check the current form, or zero for no form
 		const currentForm = this.forms.find(form => this.actors.current.hasStatus(form)) || 0
-
-		// We went from having a from to losing a form
-		if (currentForm === 0 && this.lastForm !== 0) {
-			this.lastFormDropped = event.timestamp
-		}
-
-		if (currentForm !== 0) {
-			this.lastFormChanged = event.timestamp
-		}
-
-		this.lastForm = currentForm
 		const untargetable = this.lastFormChanged != null
 			? this.downtime.getDowntime(this.lastFormChanged, event.timestamp)
 			: 0
@@ -130,6 +116,8 @@ export class Forms extends Analyser {
 	private onGain(event: Events['statusApply']): void {
 		this.lastFormChanged = event.timestamp
 
+		this.resetFormHook()
+
 		this.formHook = this.addEventHook(
 			filter<Event>()
 				.source(this.parser.actor.id)
@@ -141,6 +129,14 @@ export class Forms extends Analyser {
 	private onRemove(event: Events['statusRemove']): void {
 		this.lastFormDropped = event.timestamp
 
+		this.resetFormHook()
+	}
+
+	private onBlitzUsed(event: Events['action']): void {
+		this.lastBlitzUsed = event.timestamp
+	}
+
+	private resetFormHook() {
 		if (this.formHook != null) {
 			this.removeEventHook(this.formHook)
 			this.formHook = undefined
